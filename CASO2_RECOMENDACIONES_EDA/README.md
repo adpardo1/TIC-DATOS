@@ -46,7 +46,7 @@ o	Matplotlib y Seaborn: Para la generación de visualizaciones.
 
 o	LLAMA_API  model="meta-llama/Meta-Llama-3-8B-Instruct"
 
-o	GEMINI_API_URL= "https://api-inference.huggingface.co/models/google/gemma-1.1-2b-it"
+o	GEMINI_API_URL= "https://generativelanguage.googleapis.com/v1/models/gemini-pro:generateContent?"
 
 o	headers = {"Authorization": " GEMINI_API_URL, LLAMA_API_URL "}, debe extraerse de un archive .env, donde se encuentran todas las api key.
 
