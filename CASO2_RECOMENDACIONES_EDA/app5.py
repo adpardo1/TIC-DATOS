@@ -1,146 +1,224 @@
-import streamlit as st
 import requests
 import pandas as pd
+import streamlit as st
+import matplotlib.pyplot as plt
+import seaborn as sns
 from huggingface_hub import InferenceClient
-import json
+from dotenv import load_dotenv
 import os
-from dotenv import load_dotenv 
+import nbformat as nbf
 
+
+# Cargar las variables de entorno del archivo .env
 load_dotenv()
 
+# Configurar la API Key de Gemini desde el archivo .env
+API_KEY = os.getenv("GEMINI_API_KEY")
+
+# Configuración de la API de Llama desde el archivo .env
 LLAMA_API_KEY = os.getenv("LLAMA_API_KEY")
-GEMMA_API_URL = os.getenv("GEMMA_API_URL")
-GEMMA_API_KEY = os.getenv("GEMMA_API_KEY")
-
-if not LLAMA_API_KEY or not GEMMA_API_URL or not GEMMA_API_KEY:
-    st.error("Missing API keys in the environment. Please check your .env file.")
-
-llama_client = InferenceClient(api_key=LLAMA_API_KEY)
-
-headers = {"Authorization": f"Bearer {GEMMA_API_KEY}"}
-
-# Functions
-def query_gemma(payload):
-    try:
-        response = requests.post(GEMMA_API_URL, headers=headers, json=payload)
-        response.raise_for_status()
-        return response.json()
-    except requests.exceptions.RequestException as e:
-        st.error(f"API request error: {e}")
-        return None
+client = InferenceClient(api_key=LLAMA_API_KEY)
 
 def query_llama(prompt):
+    """Function to query the Meta-Llama model."""
     try:
-        messages = [{"role": "user", "content": prompt}]
-        response = llama_client.chat_completion(
+        response = client.chat_completion(
             model="meta-llama/Meta-Llama-3-8B-Instruct",
-            messages=messages,
+            messages=[{"role": "user", "content": prompt}],
             max_tokens=500,
             stream=False
         )
-        return response["choices"][0]["message"]["content"]
+        return response.choices[0].message["content"]
     except Exception as e:
-        st.error(f"Llama API request error: {e}")
+        st.error(f"Error during API request: {e}")
         return None
 
-def generate_synthetic_data_prompt(theme, variable_names, num_items):
-    variables_str = ', '.join(variable_names)
-    prompt = (f"Generate {num_items} synthetic data entries based on the theme '{theme}'. "
-              f"Each entry should contain the following variables in the format: "
-              f"({variables_str}). Provide the data entries in the same format without additional descriptions.")
+def get_gemini_recommendations(prompt):
+    """Function to query the Gemini API and get recommendations."""
+    url = f"https://generativelanguage.googleapis.com/v1/models/gemini-pro:generateContent?key={API_KEY}"
+    headers = {'Content-Type': 'application/json'}
+    payload = {
+        "contents": [
+            {
+                "role": "user",
+                "parts": [
+                    {"text": prompt}
+                ]
+            }
+        ]
+    }
+
+    response = requests.post(url, headers=headers, json=payload)
+    if response.status_code == 200:
+        return response.json()["candidates"][0]["content"]["parts"][0]["text"]
+    else:
+        raise Exception(f"API error: {response.status_code}, {response.text}")
+
+def generate_eda_prompt(dataframe):
+    """Generate a prompt for EDA recommendations based on the dataset columns and statistical summary."""
+    columns = dataframe.columns.tolist()
+    summary = dataframe.describe().to_string()  # Getting the statistical summary of the dataset
+    prompt = (f"I have a dataset with the following columns: {', '.join(columns)}. "
+              "Here is a statistical summary of the dataset:\n\n"
+              f"{summary}\n\n"
+              "Please provide detailed recommendations for exploratory data analysis (EDA), "
+              "including data cleaning, transformation, handling missing values, normalization, "
+              "and specific visualizations for each variable. "
+              "Additionally, suggest relevant code snippets for these tasks.")
     return prompt
 
-def parse_variable_names(response_text):
-    lines = response_text.split('\n')
-    variable_names = []
-    for line in lines:
-        stripped_line = line.strip().replace('*', '').replace('"', '').replace("'", "")
-        if stripped_line and stripped_line[0].isdigit() and '.' in stripped_line:
-            variable_name = stripped_line.split('. ', 1)[1]
-            variable_names.append(variable_name)
-    return variable_names
+def generate_visualization_prompt(dataframe):
+    """Generate a prompt for meaningful visualizations."""
+    columns = dataframe.columns.tolist()
+    prompt = (
+        f"I have a dataset with the following columns: {', '.join(columns)}. "
+        "Based on this dataset, suggest global visualization techniques to help analyze variable relationships, "
+        "detect patterns, and understand the overall data structure. Avoid providing separate visualizations for each column. "
+        "Instead, focus on aspects like:\n"
+        "- Correlation heatmaps to identify relationships among numerical variables.\n"
+        "- Scatter plots or scatterplot matrices for multivariate analysis.\n"
+        "- Bar or line plots to analyze trends or aggregates.\n"
+        "- Grouped visualizations, such as box plots, to compare distributions across categories.\n\n"
+        "Provide Python code for each recommended visualization, ensuring compatibility with Streamlit. The code should include:\n"
+        "- The use of matplotlib or seaborn for creating visualizations.\n"
+        "- Displaying the plot in Streamlit using 'st.pyplot()'.\n"
+        "- Closing the plot after rendering with 'plt.close()' to avoid overlaps.\n\n"
+        "Tailor the visualizations to the dataset structure, such as numerical, categorical, or temporal variables, "
+        "to provide useful insights and enhance understanding."
+    )
+    return prompt
 
-def parse_synthetic_data(response_text, num_variables):
-    rows = []
-    lines = response_text.split('\n')
-    for line in lines:
-        line = line.strip()
-        if line.startswith(tuple(str(i) for i in range(1, 11))):
-            line = line.split(' ', 1)[1]
-        if line.startswith('(') and line.endswith(')'):
-            row = line[1:-1].split(', ')
-            cleaned_row = []
-            for value in row:
-                if ':' in value:
-                    value_cleaned = value.split(':')[1].strip()
-                else:
-                    value_cleaned = value.strip()
-                cleaned_row.append(value_cleaned)
-            if len(cleaned_row) == num_variables:
-                rows.append(cleaned_row)
-            else:
-                st.warning(f"Incomplete row detected and skipped: {line}")
-    return rows
+def show_default_visualizations(dataframe):
+    """Display basic default visualizations based on the dataset."""
+    st.subheader("Suggested Visualizations")
 
-def clean_variable_name(variable_name):
-    cleaned_name = variable_name.replace('"', '').replace("'", "")
-    if ':' in cleaned_name:
-        return cleaned_name.split(':')[0].strip()
-    return cleaned_name.strip()
+    # Show distributions of numerical variables
+    num_vars = dataframe.select_dtypes(include=["float64", "int64"]).columns.tolist()
+    if num_vars:
+        st.write("Distribution of numerical variables:")
+        for var in num_vars:
+            st.write(f"Distribution of {var}:")
+            plt.figure(figsize=(8, 6))
+            sns.histplot(dataframe[var], kde=True)
+            st.pyplot(plt)
+            plt.close()
 
-# Main function
+def create_notebook(eda_recommendations, visualization_recommendations, code_to_execute, dataframe):
+    """Create a Jupyter notebook with the recommendations and code."""
+    nb = nbf.v4.new_notebook()
+
+    # Add EDA recommendations in Markdown
+    nb.cells.append(nbf.v4.new_markdown_cell("# EDA Recommendations"))
+    nb.cells.append(nbf.v4.new_markdown_cell(eda_recommendations))
+
+    # Add Visualization recommendations in Markdown
+    nb.cells.append(nbf.v4.new_markdown_cell("# Visualization Recommendations"))
+    nb.cells.append(nbf.v4.new_markdown_cell(visualization_recommendations))
+
+    # Add the code to execute (ensure this is a code cell)
+    nb.cells.append(nbf.v4.new_markdown_cell("# Code to Execute"))
+    nb.cells.append(nbf.v4.new_code_cell(code_to_execute))
+
+    # Save the notebook as a .ipynb file without adding any images
+    return nb
+
+def save_notebook(nb):
+    """Save the generated notebook to a file."""
+    notebook_filename = "eda_recommendations_and_code.ipynb"
+    with open(notebook_filename, 'w') as f:
+        nbf.write(nb, f)
+    return notebook_filename
+
+def execute_code(code, dataframe):
+    """Execute user-provided code and display the result."""
+    try:
+        local_context = {"df": dataframe, "st": st, "plt": plt, "sns": sns, "__builtins__": __builtins__}
+        exec(code, local_context)
+    except Exception as e:
+        st.error(f"Error executing code: {e}")
+
 def main():
-    st.title("Synthetic Data Generator")
+    st.title("Exploratory Data Analysis")
+    st.write("Upload your dataset to get personalized analysis and visualizations.")
 
-    menu_options = ["Generate Synthetic Data", "Upload Dataset Fragment"]
-    menu_selection = st.sidebar.selectbox("Select an option:", menu_options)
+    uploaded_file = st.file_uploader("Upload your CSV file", type=["csv"])
 
-    if menu_selection == "Generate Synthetic Data":
-        model_choice = st.selectbox("Select a model:", ("Gemma-1.1-2b-it", "Meta-Llama-3-8B-Instruct"))
+    # Model selection
+    model_choice = st.selectbox(
+        "Choose the model for generating recommendations:",
+        ["Meta-Llama 3-8B-Instruct", "Gemini Pro"]
+    )
 
-        theme = st.text_input("Enter a theme for generating variables:", "")
-        num_variables = st.number_input("Enter the number of variables to generate:", min_value=1, value=4)
-        num_items = st.number_input("Enter the number of data entries to generate:", min_value=1, value=10)
+    if uploaded_file:
+        global df  # Declare df as global to make it accessible in the exec context
+        df = pd.read_csv(uploaded_file)
+        st.write("Dataset successfully loaded. Preview:")
+        st.write(df.head())
 
-        if st.button("Generate variables"):
-            variable_names_prompt = (f"Generate a list of {num_variables} variable names that could be used in a synthetic dataset related to the theme '{theme}'. "
-                                     "Make sure the variables are relevant and specific to this theme.")
-            if model_choice == "Gemma-1.1-2b-it":
-                variable_names_output = query_gemma({"inputs": variable_names_prompt})
-                if variable_names_output:
-                    variable_names_text = variable_names_output[0].get('generated_text', '')
-                    st.session_state.variable_names = parse_variable_names(variable_names_text)
-            elif model_choice == "Meta-Llama-3-8B-Instruct":
-                variable_names_text = query_llama(variable_names_prompt)
-                if variable_names_text:
-                    st.session_state.variable_names = parse_variable_names(variable_names_text)
+        # Show default visualizations
+        show_default_visualizations(df)
 
-        if 'variable_names' in st.session_state:
-            st.subheader("Generated Variables")
-            edited_variable_names = []
-            for i, var in enumerate(st.session_state.variable_names):
-                edited_variable_name = st.text_input(f"Variable {i+1}:", var, key=f"var_{i}")
-                edited_variable_names.append(edited_variable_name)
+        # Generate prompts for EDA and visualizations
+        if 'eda_recommendations' not in st.session_state:
+            eda_prompt = generate_eda_prompt(df)
+            visualization_prompt = generate_visualization_prompt(df)
 
-            new_variable = st.text_input("Add a new variable:")
-            if new_variable:
-                edited_variable_names.append(new_variable)
+            st.write("Generating EDA recommendations...")
 
-            st.session_state.variable_names = edited_variable_names
+            try:
+                # Get recommendations based on the selected model
+                if model_choice == "Meta-Llama 3-8B-Instruct":
+                    eda_recommendations = query_llama(eda_prompt)
+                    visualization_recommendations = query_llama(visualization_prompt)
+                elif model_choice == "Gemini Pro":
+                    eda_recommendations = get_gemini_recommendations(eda_prompt)
+                    visualization_recommendations = get_gemini_recommendations(visualization_prompt)
 
-            synthetic_prompt = generate_synthetic_data_prompt(theme, edited_variable_names, num_items)
+                st.session_state.eda_recommendations = eda_recommendations
+                st.session_state.visualization_recommendations = visualization_recommendations
 
-            if st.button("Generate synthetic data"):
-                synthetic_output = query_llama(synthetic_prompt)
-                if synthetic_output:
-                    all_data_rows = parse_synthetic_data(synthetic_output, len(edited_variable_names))
-                    cleaned_variable_names = [clean_variable_name(var) for var in edited_variable_names]
-                    df = pd.DataFrame(all_data_rows, columns=[var.replace(' ', '_').upper() for var in cleaned_variable_names])
-                    st.subheader("Synthetic Dataset")
-                    st.write(df)
+                st.subheader("EDA Recommendations:")
+                st.write(eda_recommendations)
 
-                    st.download_button("Download as CSV", df.to_csv(index=False).encode('utf-8'), "dataset.csv", "text/csv")
-                    st.download_button("Download as JSON", df.to_json(orient='records', lines=True).encode('utf-8'), "dataset.json", "application/json")
+                st.subheader("Visualization Recommendations with Code:")
+                st.write(visualization_recommendations)
+
+            except Exception as e:
+                st.error(f"Error obtaining recommendations: {e}")
+
+        else:
+            st.subheader("EDA Recommendations:")
+            st.write(st.session_state.eda_recommendations)
+            st.subheader("Visualization Recommendations with Code:")
+            st.write(st.session_state.visualization_recommendations)
+
+        # Execute recommended code
+        st.subheader("Execute Recommended Code:")
+        recommended_code = st.text_area("Enter code here to execute (you can copy it from the recommendations):")
+
+        if st.button("Execute Code"):
+            if 'df' in globals():
+                execute_code(recommended_code, df)
+            else:
+                st.error("No dataset loaded. Please upload a CSV file first.")
+
+        # Export notebook
+        if st.button("Export Notebook"):
+            notebook = create_notebook(
+                st.session_state.eda_recommendations,
+                st.session_state.visualization_recommendations,
+                recommended_code,
+                df
+            )
+            notebook_filename = save_notebook(notebook)
+            st.success(f"Notebook saved as {notebook_filename}. You can download it now.")
+            with open(notebook_filename, "rb") as f:
+                st.download_button(
+                    label="Download Notebook",
+                    data=f,
+                    file_name=notebook_filename,
+                    mime="application/octet-stream"
+                )
 
 if __name__ == "__main__":
     main()
